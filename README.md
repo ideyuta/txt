@@ -1,45 +1,52 @@
 # txt。
 
-iCloud Drive に保存できる、紙のように静かなメモ帳。ビルド不要の静的 Web アプリです。
+クラウドに綴じる、紙のように静かなメモ帳。ビルド不要・サーバーレスの静的 Web アプリです。
 
 **公開 URL:** https://ideyuta.com/txt/ （https://ideyuta.github.io/txt/ からもリダイレクト）
 
 - メモの作成・編集・削除・検索、自動保存（⌘N 新規 / ⌘S 即時保存）
-- **1 メモ = 1 つの Markdown ファイル**としてユーザーが選んだフォルダに保存
-  - iCloud Drive 内のフォルダを選べば、Apple が自動で全端末に同期
-  - 素の `.md` なので、ファイル.app や任意のエディタからもそのまま読み書き可能
-- Apple Developer 登録・サーバー・アカウント一切不要
-- JSON 一括エクスポート / インポート対応
+- **1 メモ = 1 つの Markdown ファイル**として保存。保存先は 3 つから選べます
 
-## 使い方
+| 保存先 | 同期 | 対応環境 | セットアップ |
+| --- | --- | --- | --- |
+| **Google ドライブ** | ○ 全端末（iPhone 含む） | すべてのブラウザ | OAuth クライアント ID（初回のみ、下記） |
+| **フォルダ**（iCloud Drive 等） | ○ Apple が同期 | Mac/Win の Chrome・Edge | フォルダを選ぶだけ |
+| **ブラウザ内**（localStorage） | ✕ | すべて | 不要（初期状態） |
 
-1. **Mac の Chrome / Edge** で https://ideyuta.com/txt/ を開く
-2. 左下の「ローカル保存」チップ →「保存先フォルダを選択…」
-3. iCloud Drive 内のフォルダ（例: `iCloud Drive/メモ`）を選んで「保存」を許可
-4. あとは書くだけ。メモは `タイトル.xxxx.md` として保存され、iCloud Drive が同期します
+## Google ドライブで使う（推奨・iPhone 対応）
 
-> 権限について: ハンドルはブラウザ内（IndexedDB）に永続化されます。再訪時に「前回のフォルダに再接続」のワンクリック再許可を求められることがありますが、Chrome 122 以降は許可ダイアログで「今後も許可」を選ぶと省略できます。
+メモはあなたのドライブの「txt メモ」フォルダに `.md` として保存されます。アプリは **`drive.file` 最小スコープ**（自分が作ったファイルのみアクセス可）で動き、アクセストークンはメモリ内のみ・どこにも永続化しません。
 
-## 対応環境
+### OAuth クライアント ID の取得（初回のみ・無料・約 10 分）
 
-| 環境 | フォルダ保存（iCloud Drive 同期） | ローカル保存 |
-| --- | --- | --- |
-| Mac / Windows の Chrome・Edge | ○ | ○（未接続時） |
-| Safari（Mac / iPhone / iPad） | ✕（File System Access API 非対応） | ○ |
-| iPhone / iPad の各ブラウザ | ✕（iOS は全ブラウザ非対応） | ○ |
+1. [Google Cloud Console](https://console.cloud.google.com/) → 新しいプロジェクトを作成（名前は任意。例: `txt-memo`）
+2. **API とサービス → ライブラリ** → 「Google Drive API」を検索して**有効化**
+3. **API とサービス → OAuth 同意画面** → User Type は **外部** → アプリ名とメールアドレスを入力して作成 → **公開ステータスを「本番環境」に**（`drive.file` のみなら Google の審査は不要。「未確認のアプリ」と表示されますが自分用なら問題ありません）
+4. **API とサービス → 認証情報 → 認証情報を作成 → OAuth クライアント ID** → 種類は **ウェブ アプリケーション**
+5. **承認済みの JavaScript 生成元**に以下を追加:
+   - `https://ideyuta.com`
+   - `http://localhost:8000`（ローカル開発する場合）
+6. 発行された**クライアント ID**（`xxxx.apps.googleusercontent.com`）をコピー
 
-- iPhone では、Mac で保存した `.md` を**ファイル.app から閲覧・編集**できます（この Web アプリからは開けません）
-- 非対応ブラウザでは localStorage に保存されます。**Safari は 7 日間アクセスがないとサイトデータを削除する**ことがあるため、大事なメモは設定からエクスポートするか、フォルダ保存環境をお使いください
+### アプリへの設定
 
-## データ形式
+1. アプリ左下のチップ（または歯車）→ 設定を開く
+2. クライアント ID を貼り付けて「Google ドライブに接続」
+3. Google のポップアップでアカウントを選んで許可 → 完了
 
-```
-選んだフォルダ/
-├── 買い物リスト.k3x9.md   ← 本文がそのまま入った素の Markdown
-└── 会議メモ.a1b2.md       ← 末尾 4 文字はリネーム追跡用の id
-```
+トークンは約 1 時間で失効しますが、通常は自動で再取得されます。ポップアップがブロックされた場合だけ、左下のチップをワンクリックすれば再接続されます。
 
-ファイル名がタイトル、ファイル内容が本文、更新日時はファイルの mtime です。手動でフォルダに置いた `.md` も一覧に表示されます。
+## フォルダ（iCloud Drive）で使う
+
+Mac の Chrome / Edge で、設定 → 「保存先フォルダを選択…」から iCloud Drive 内のフォルダを選ぶだけです。メモは `タイトル.xxxx.md`（末尾 4 文字はリネーム追跡用 id）として保存され、iPhone からは**ファイル.app** で読めます。フォルダを Obsidian の vault にすれば Obsidian とも併用できます。
+
+## セキュリティ設計
+
+- サーバー・共有 DB・シークレットを一切持たない静的サイト（クライアント ID は公開前提の値）
+- Google のトークンはメモリのみ保持（localStorage 等に保存しない）
+- `drive.file` スコープによりドライブ全体にはアクセス不能
+- CSP で接続先を Google API / フォント配信のみに制限
+- 非対応環境のメモは localStorage 保存。**Safari は 7 日間アクセスがないとサイトデータを削除する**ことがあるため、設定のエクスポートで控えを残せます
 
 ## 開発
 
@@ -53,9 +60,12 @@ python3 -m http.server 8000
 構成:
 
 ```
-index.html   マークアップ
+index.html   マークアップ + CSP
 style.css    スタイル（紙とインクのテーマ）
-app.js       ロジック（LocalStore / FolderStore の 2 ストレージ）
+app.js       ロジック（LocalStore / FolderStore / DriveStore の 3 ストレージ）
 ```
 
-テスト用に `?opfs` クエリを付けると、フォルダの代わりに OPFS（Origin Private File System）を保存先にしてフォルダ保存経路を headless ブラウザで検証できます。
+テスト用フック:
+
+- `?opfs` — フォルダの代わりに OPFS を保存先にして FolderStore 経路を headless で検証
+- `?mockdrive` — 偽トークンで DriveStore 経路を有効化（Google API はテスト側で route モック）

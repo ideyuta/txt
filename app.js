@@ -1,11 +1,14 @@
 /* ───────────────────────────────────────────
-   txt。 — iCloud Drive フォルダ + localStorage メモ帳
+   txt。 — クラウドに綴じるメモ帳
 
-   保存先は 2 段構え:
+   保存先は 3 種:
+   - DriveStore: Google ドライブ（drive.file 最小スコープ）。
+     1 メモ = 1 Markdown。全ブラウザ・iPhone 対応。
+     トークンはメモリのみに保持し、永続化しない。
    - FolderStore: File System Access API でユーザーが選んだ
      フォルダ（iCloud Drive 内を想定）に 1 メモ = 1 Markdown。
      同期は iCloud Drive 任せ。Chromium デスクトップ限定。
-   - LocalStore: 非対応ブラウザ / 未接続時の localStorage。
+   - LocalStore: 未接続時の localStorage。
    ─────────────────────────────────────────── */
 
 "use strict";
@@ -31,6 +34,9 @@ const els = {
   meta: $("editor-meta"),
   dialog: $("settings-dialog"),
   settingsStatus: $("settings-status"),
+  driveClientId: $("drive-client-id"),
+  btnDriveConnect: $("btn-drive-connect"),
+  btnDriveDisconnect: $("btn-drive-disconnect"),
   btnChooseFolder: $("btn-choose-folder"),
   btnDisconnect: $("btn-disconnect"),
   btnMigrate: $("btn-migrate"),
@@ -41,6 +47,8 @@ const els = {
 };
 
 const NOTES_KEY = "txt.notes.v1";
+const MODE_KEY = "txt.mode"; // "drive" | "folder" | "local"
+const DRIVE_CFG_KEY = "txt.drive.cfg"; // { clientId, folderId } トークンは保存しない
 const FS_SUPPORTED = "showDirectoryPicker" in window;
 
 /* ───────── IndexedDB（ディレクトリハンドルの永続化） ───────── */
@@ -173,6 +181,159 @@ const FolderStore = {
   async remove(id) { await this.dir.removeEntry(id); },
 };
 
+/* ───────── Google ドライブ保存 ───────── */
+
+const GIS_SRC = "https://accounts.google.com/gsi/client";
+const DRIVE_API = "https://www.googleapis.com/drive/v3";
+const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3";
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const DRIVE_FOLDER_NAME = "txt メモ";
+
+function loadDriveCfg() {
+  try { return JSON.parse(localStorage.getItem(DRIVE_CFG_KEY)) || {}; }
+  catch { return {}; }
+}
+
+function saveDriveCfg(cfg) { localStorage.setItem(DRIVE_CFG_KEY, JSON.stringify(cfg)); }
+
+const Drive = {
+  clientId: null,
+  token: null, // アクセストークンはメモリのみ（XSS 耐性のため永続化しない）
+  tokenExp: 0,
+  tokenClient: null,
+
+  async loadGis() {
+    if (window.google && window.google.accounts && window.google.accounts.oauth2) return;
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = GIS_SRC;
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("Google ログインライブラリを読み込めませんでした"));
+      document.head.appendChild(s);
+    });
+  },
+
+  async getToken() {
+    if (this.token && Date.now() < this.tokenExp - 60000) return this.token;
+    await this.loadGis();
+    if (!this.tokenClient || this._tokenClientId !== this.clientId) {
+      this.tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: this.clientId,
+        scope: DRIVE_SCOPE,
+        callback: () => {},
+      });
+      this._tokenClientId = this.clientId;
+    }
+    return new Promise((resolve, reject) => {
+      const fail = (message) => {
+        const err = new Error(message);
+        err.name = "NotAllowedError";
+        reject(err);
+      };
+      this.tokenClient.callback = (resp) => {
+        if (resp.error) return fail(resp.error);
+        this.token = resp.access_token;
+        this.tokenExp = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+        resolve(this.token);
+      };
+      this.tokenClient.error_callback = (err) => fail(err && err.message ? err.message : "popup_blocked");
+      this.tokenClient.requestAccessToken({ prompt: "" });
+    });
+  },
+
+  async fetch(url, options = {}, retry = true) {
+    const token = await this.getToken();
+    const res = await window.fetch(url, {
+      ...options,
+      headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 401 && retry) {
+      this.token = null; // 失効 → 取り直して 1 回だけ再試行
+      return this.fetch(url, options, false);
+    }
+    if (!res.ok) {
+      const err = new Error(`Drive API ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return res;
+  },
+
+  // アプリ専用フォルダ（drive.file スコープではこのアプリが作ったものだけ見える）
+  async ensureFolder() {
+    const cfg = loadDriveCfg();
+    if (cfg.folderId) {
+      try {
+        const res = await this.fetch(`${DRIVE_API}/files/${cfg.folderId}?fields=id,trashed`);
+        const f = await res.json();
+        if (!f.trashed) return cfg.folderId;
+      } catch { /* 消えていたら作り直す */ }
+    }
+    const q = encodeURIComponent(
+      `name = '${DRIVE_FOLDER_NAME}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+    );
+    const found = await (await this.fetch(`${DRIVE_API}/files?q=${q}&fields=files(id)`)).json();
+    if (found.files && found.files.length > 0) return found.files[0].id;
+
+    const created = await (await this.fetch(`${DRIVE_API}/files?fields=id`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: DRIVE_FOLDER_NAME, mimeType: "application/vnd.google-apps.folder" }),
+    })).json();
+    return created.id;
+  },
+};
+
+const DriveStore = {
+  kind: "drive",
+  folderId: null,
+  async list() {
+    const q = encodeURIComponent(
+      `'${this.folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`
+    );
+    const res = await Drive.fetch(`${DRIVE_API}/files?q=${q}&fields=files(id,name,modifiedTime)&pageSize=1000`);
+    const { files = [] } = await res.json();
+    const notes = await Promise.all(files.map(async (f) => ({
+      id: f.id,
+      title: f.name.replace(/\.md$/, ""),
+      body: await (await Drive.fetch(`${DRIVE_API}/files/${f.id}?alt=media`)).text(),
+      updatedAt: Date.parse(f.modifiedTime) || Date.now(),
+    })));
+    return notes.sort((a, b) => b.updatedAt - a.updatedAt);
+  },
+  async save(note) {
+    const isNew = note.id.startsWith("l_");
+    const metadata = { name: sanitizeTitle(note.title) + ".md", mimeType: "text/markdown" };
+    if (isNew) metadata.parents = [this.folderId];
+
+    // メタデータ + 本文を 1 リクエストで送る multipart アップロード
+    const boundary = "txtb" + Math.random().toString(36).slice(2);
+    const body =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n` +
+      `--${boundary}\r\nContent-Type: text/markdown; charset=UTF-8\r\n\r\n${note.body}\r\n--${boundary}--`;
+    const url = isNew
+      ? `${DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name,modifiedTime`
+      : `${DRIVE_UPLOAD}/files/${note.id}?uploadType=multipart&fields=id,name,modifiedTime`;
+
+    const res = await Drive.fetch(url, {
+      method: isNew ? "POST" : "PATCH",
+      headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+      body,
+    });
+    const f = await res.json();
+    return { ...note, id: f.id, updatedAt: Date.parse(f.modifiedTime) || Date.now() };
+  },
+  async remove(id) {
+    // 完全削除ではなくゴミ箱へ（誤削除から復元できる）
+    await Drive.fetch(`${DRIVE_API}/files/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ trashed: true }),
+    });
+  },
+};
+
 /* ───────── 状態 ───────── */
 
 const state = {
@@ -183,7 +344,8 @@ const state = {
   dirty: false,
   saveTimer: null,
   saving: Promise.resolve(),
-  pendingDir: null, // 権限の再付与待ちハンドル
+  pendingDir: null,   // フォルダ: 権限の再付与待ちハンドル
+  drivePending: false, // Drive: サイレント再認証に失敗し、クリック待ち
 };
 
 /* ───────── UI ヘルパー ───────── */
@@ -220,9 +382,12 @@ function currentNote() {
 }
 
 function fsErrorMessage(err, fallback) {
-  if (err && err.name === "NotAllowedError") return "フォルダへのアクセスが許可されていません（設定から再接続）";
+  if (err && err.name === "NotAllowedError") return "保存先へのアクセスが許可されていません（左下のチップから再接続）";
   if (err && err.name === "NotFoundError") return "保存先のフォルダ / ファイルが見つかりません";
   if (err && err.name === "QuotaExceededError") return "ストレージ容量が不足しています";
+  if (err && err.status === 403) return "Google ドライブの権限が不足しています（再接続してください）";
+  if (err && err.status === 404) return "Google ドライブ上にファイルが見つかりません";
+  if (err && err.status >= 500) return "Google ドライブが一時的に応答していません";
   return fallback;
 }
 
@@ -380,7 +545,8 @@ function saveNow() {
         note.id = saved.id;
       }
       note.updatedAt = saved.updatedAt;
-      setSaveState("saved", state.store.kind === "folder" ? "フォルダに保存済み" : "このブラウザに保存済み");
+      const savedLabel = { drive: "Google ドライブに保存済み", folder: "フォルダに保存済み", local: "このブラウザに保存済み" };
+      setSaveState("saved", savedLabel[state.store.kind]);
       renderList();
     } catch (err) {
       console.error("save failed:", err);
@@ -419,6 +585,7 @@ async function chooseFolder() {
     await flushSave();
     await idb.set("dir", dir);
     state.pendingDir = null;
+    localStorage.setItem(MODE_KEY, "folder");
     await enterFolderMode(dir);
     els.dialog.close();
     toast(`「${dir.name}」と接続しました`);
@@ -451,8 +618,8 @@ async function disconnectFolder() {
   if (!confirm("フォルダ接続を解除しますか？（フォルダ内の .md ファイルは残ります）")) return;
   await idb.del("dir");
   state.pendingDir = null;
+  localStorage.setItem(MODE_KEY, "local");
   enterLocalMode();
-  renderSettings();
   toast("フォルダ接続を解除しました");
 }
 
@@ -460,6 +627,7 @@ async function enterFolderMode(dir) {
   FolderStore.dir = dir;
   state.store = FolderStore;
   state.currentId = null;
+  state.drivePending = false;
   setSyncStatus("cloud", dir.name ? `フォルダと同期中: ${dir.name}` : "フォルダと同期中");
   await reloadNotes();
   renderSettings();
@@ -468,15 +636,86 @@ async function enterFolderMode(dir) {
 function enterLocalMode(label) {
   state.store = LocalStore;
   state.currentId = null;
-  setSyncStatus(state.pendingDir ? "pending" : "", label || "ローカル保存");
+  setSyncStatus(state.pendingDir || state.drivePending ? "pending" : "", label || "ローカル保存");
   reloadNotes();
   renderSettings();
 }
 
-// 他端末の変更（iCloud Drive が背後で同期したファイル）を拾う
+/* ───────── Google ドライブ接続 ───────── */
+
+async function connectDrive() {
+  const clientId = els.driveClientId.value.trim();
+  if (!clientId) {
+    toast("OAuth クライアント ID を入力してください（取得手順は README）", true);
+    return;
+  }
+  els.btnDriveConnect.disabled = true;
+  try {
+    await flushSave();
+    Drive.clientId = clientId;
+    Drive.token = null;
+    await Drive.getToken(); // 初回はここで Google の同意ポップアップが開く
+    const folderId = await Drive.ensureFolder();
+    saveDriveCfg({ clientId, folderId });
+    localStorage.setItem(MODE_KEY, "drive");
+    state.drivePending = false;
+    await enterDriveMode();
+    els.dialog.close();
+    toast("Google ドライブと接続しました");
+  } catch (err) {
+    console.error(err);
+    toast(fsErrorMessage(err, "Google ドライブに接続できませんでした"), true);
+  } finally {
+    els.btnDriveConnect.disabled = false;
+  }
+}
+
+// 再訪時のサイレント再認証。ポップアップブロック等で失敗したらクリック待ちにする
+async function resumeDrive() {
+  const cfg = loadDriveCfg();
+  Drive.clientId = cfg.clientId;
+  try {
+    await Drive.getToken();
+    DriveStore.folderId = await Drive.ensureFolder();
+    saveDriveCfg({ ...cfg, folderId: DriveStore.folderId });
+    state.drivePending = false;
+    await enterDriveMode();
+  } catch (err) {
+    console.error("drive resume failed:", err);
+    state.drivePending = true;
+    enterLocalMode("Google に再接続（クリック）");
+  }
+}
+
+async function disconnectDrive() {
+  if (!confirm("Google ドライブ接続を解除しますか？（ドライブ上のメモは残ります）")) return;
+  try {
+    if (Drive.token && window.google && google.accounts && google.accounts.oauth2) {
+      google.accounts.oauth2.revoke(Drive.token, () => {});
+    }
+  } catch { /* revoke は失敗しても続行 */ }
+  Drive.token = null;
+  localStorage.removeItem(DRIVE_CFG_KEY);
+  localStorage.setItem(MODE_KEY, "local");
+  state.drivePending = false;
+  enterLocalMode();
+  toast("Google ドライブ接続を解除しました");
+}
+
+async function enterDriveMode() {
+  if (!DriveStore.folderId) DriveStore.folderId = loadDriveCfg().folderId;
+  state.store = DriveStore;
+  state.currentId = null;
+  state.pendingDir = null;
+  setSyncStatus("cloud", "Google ドライブと同期中");
+  await reloadNotes();
+  renderSettings();
+}
+
+// 他端末の変更（Drive / iCloud Drive 側で更新されたファイル）を拾う
 let lastRefresh = 0;
-function refreshFromDisk() {
-  if (state.store.kind !== "folder" || state.dirty) return;
+function refreshFromRemote() {
+  if (state.store.kind === "local" || state.dirty) return;
   if (Date.now() - lastRefresh < 4000) return;
   lastRefresh = Date.now();
   reloadNotes();
@@ -485,19 +724,21 @@ function refreshFromDisk() {
 /* ───────── 移行・エクスポート ───────── */
 
 async function migrateLocalNotes() {
+  if (state.store.kind === "local") return;
+  const dest = state.store.kind === "drive" ? "Google ドライブ" : "フォルダ";
   const localNotes = LocalStore._read();
   if (localNotes.length === 0) return;
-  if (!confirm(`このブラウザに保存された ${localNotes.length} 件のメモをフォルダへコピーします。よろしいですか？`)) return;
+  if (!confirm(`このブラウザに保存された ${localNotes.length} 件のメモを${dest}へコピーします。よろしいですか？`)) return;
 
   els.btnMigrate.disabled = true;
   let ok = 0;
   try {
     for (const note of localNotes) {
-      await FolderStore.save({ ...note, id: "l_migrate" });
+      await state.store.save({ ...note, id: "l_migrate" });
       ok++;
     }
     localStorage.removeItem(NOTES_KEY);
-    toast(`${ok} 件のメモをフォルダへコピーしました`);
+    toast(`${ok} 件のメモを${dest}へコピーしました`);
     await reloadNotes();
     renderSettings();
   } catch (err) {
@@ -548,34 +789,50 @@ async function importNotes(file) {
 /* ───────── 設定モーダル ───────── */
 
 function renderSettings() {
-  const connected = state.store.kind === "folder";
-  const pending = !!state.pendingDir;
+  const kind = state.store.kind;
+  const folderPending = !!state.pendingDir;
 
   let status;
-  if (!FS_SUPPORTED) {
-    status = "このブラウザはフォルダ保存（File System Access API）に対応していません。"
-      + "Mac の Chrome / Edge で開くと iCloud Drive のフォルダに保存できます。"
-      + "メモは現在このブラウザ内に保存されています。"
-      + "※Safari は 7 日間アクセスがないとブラウザ内データを削除することがあるため、エクスポートで控えを残せます。";
-  } else if (connected) {
+  if (kind === "drive") {
+    status = `Google ドライブと接続中。メモはドライブの「${DRIVE_FOLDER_NAME}」フォルダに`
+      + " 1 件 = 1 つの .md ファイルとして保存され、どのブラウザ・iPhone からでも開けます。";
+  } else if (kind === "folder") {
     const name = FolderStore.dir && FolderStore.dir.name;
     status = `フォルダ${name ? `「${name}」` : ""}と接続中。メモは 1 件 = 1 つの .md ファイルとして保存され、`
       + "iCloud Drive 内のフォルダなら Apple が自動同期します。iPhone からはファイル.app で読めます。";
-  } else if (pending) {
+  } else if (state.drivePending) {
+    status = "Google ドライブへの再接続待ちです。「Google ドライブに接続」を押すと再開します。";
+  } else if (folderPending) {
     status = `前回のフォルダ「${state.pendingDir.name}」への再接続待ちです。`
       + "ブラウザのセキュリティ上、再訪時はワンクリックの再許可が必要な場合があります。";
   } else {
-    status = "iCloud Drive 内のフォルダを選ぶと、メモが .md ファイルとして保存され、Apple が自動同期します。"
-      + "未接続の間はこのブラウザ内（localStorage）に保存されます。";
+    status = "メモは現在このブラウザ内（localStorage）に保存されています。"
+      + "Google ドライブに接続すると全ブラウザ・iPhone で同期でき、"
+      + "フォルダ（Chrome / Edge のみ）を選ぶと iCloud Drive 経由で同期できます。"
+      + "※Safari は 7 日間アクセスがないとブラウザ内データを削除することがあります。";
   }
   els.settingsStatus.textContent = status;
 
+  // Google ドライブ
+  const cfg = loadDriveCfg();
+  if (!els.driveClientId.value && cfg.clientId) els.driveClientId.value = cfg.clientId;
+  els.btnDriveConnect.textContent = kind === "drive" ? "再接続 / アカウント切替"
+    : state.drivePending ? "Google ドライブに再接続"
+    : "Google ドライブに接続";
+  els.btnDriveDisconnect.hidden = !(kind === "drive" || cfg.clientId);
+
+  // フォルダ
   els.btnChooseFolder.disabled = !FS_SUPPORTED;
-  els.btnChooseFolder.textContent = pending ? "前回のフォルダに再接続"
-    : connected ? "別のフォルダに変更…"
-    : "保存先フォルダを選択…";
-  els.btnDisconnect.hidden = !connected;
-  els.btnMigrate.hidden = !(connected && LocalStore._read().length > 0);
+  if (!FS_SUPPORTED) {
+    els.btnChooseFolder.textContent = "このブラウザは非対応（Chrome / Edge のみ）";
+  } else {
+    els.btnChooseFolder.textContent = folderPending ? "前回のフォルダに再接続"
+      : kind === "folder" ? "別のフォルダに変更…"
+      : "保存先フォルダを選択…";
+  }
+  els.btnDisconnect.hidden = kind !== "folder";
+
+  els.btnMigrate.hidden = !(kind !== "local" && LocalStore._read().length > 0);
 }
 
 function openSettings() {
@@ -604,8 +861,11 @@ function bindEvents() {
   els.syncChip.addEventListener("click", () => {
     // 再接続待ちならチップから直接再許可（ユーザー操作が必要なため）
     if (state.pendingDir) reconnectFolder();
+    else if (state.drivePending) resumeDrive();
     else openSettings();
   });
+  els.btnDriveConnect.addEventListener("click", connectDrive);
+  els.btnDriveDisconnect.addEventListener("click", disconnectDrive);
   els.btnChooseFolder.addEventListener("click", () => {
     if (state.pendingDir) reconnectFolder();
     else chooseFolder();
@@ -630,10 +890,10 @@ function bindEvents() {
     }
   });
 
-  window.addEventListener("focus", refreshFromDisk);
+  window.addEventListener("focus", refreshFromRemote);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) flushSave();
-    else refreshFromDisk();
+    else refreshFromRemote();
   });
   window.addEventListener("beforeunload", () => {
     if (state.dirty) saveNow();
@@ -643,14 +903,33 @@ function bindEvents() {
 async function init() {
   bindEvents();
 
+  const params = new URLSearchParams(location.search);
+
   // テスト用フック: ?opfs で OPFS ルートを保存先にする（picker はヘッドレスで操作不能のため）
-  if (new URLSearchParams(location.search).has("opfs")) {
+  if (params.has("opfs")) {
     const dir = await navigator.storage.getDirectory();
     await enterFolderMode(dir);
     return;
   }
+  // テスト用フック: ?mockdrive で偽トークンを差して Drive 経路を通す（API はテスト側でモック）
+  if (params.has("mockdrive")) {
+    Drive.clientId = "mock-client";
+    Drive.token = "mock-token";
+    Drive.tokenExp = Date.now() + 3600 * 1000;
+    DriveStore.folderId = "mock-folder";
+    await enterDriveMode();
+    return;
+  }
 
-  if (FS_SUPPORTED) {
+  const mode = localStorage.getItem(MODE_KEY)
+    || (loadDriveCfg().clientId ? "drive" : "folder"); // 旧バージョンからの引き継ぎ
+
+  if (mode === "drive" && loadDriveCfg().clientId) {
+    await resumeDrive();
+    return;
+  }
+
+  if (mode === "folder" && FS_SUPPORTED) {
     try {
       const saved = await idb.get("dir");
       if (saved) {
@@ -662,7 +941,7 @@ async function init() {
           return;
         }
         state.pendingDir = saved;
-        enterLocalMode(`フォルダ再接続が必要（クリック）`);
+        enterLocalMode("フォルダ再接続が必要（クリック）");
         return;
       }
     } catch (err) {

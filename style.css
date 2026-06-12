@@ -473,7 +473,33 @@ body {
 .settings-actions.stack {
   flex-direction: column;
   align-items: stretch;
+  margin-top: 10px;
 }
+
+.settings-group { margin-top: 18px; }
+
+.settings-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  color: var(--ink-soft);
+  margin-bottom: 8px;
+}
+
+.text-input {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 12px;
+  color: var(--ink);
+  background: var(--paper-deep);
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  outline: none;
+}
+
+.text-input:focus { border-color: var(--ink-faint); }
+.text-input::placeholder { color: var(--ink-faint); }
 
 .btn-primary, .btn-secondary {
   font: inherit;
