@@ -1,0 +1,584 @@
+/* ───────────────────────────────────────────
+   txt。 — 紙とインクのメモ帳
+   palette: 生成り紙 / 墨 / 朱
+   ─────────────────────────────────────────── */
+
+:root {
+  --paper:        #f6f1e7;
+  --paper-deep:   #efe7d8;
+  --paper-edge:   #e3d8c3;
+  --ink:          #211c15;
+  --ink-soft:     #5c5344;
+  --ink-faint:    #998a73;
+  --shu:          #c73e2b;   /* 朱 */
+  --shu-deep:     #a82f1f;
+  --ok:           #4a7a4d;
+  --serif: "Shippori Mincho", "Hiragino Mincho ProN", serif;
+  --sans:  "Zen Kaku Gothic New", "Hiragino Kaku Gothic ProN", sans-serif;
+  --sidebar-w: 312px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+[hidden] { display: none !important; }
+
+html, body { height: 100%; }
+
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--paper-deep);
+  /* 紙の繊維のようなノイズ */
+  background-image:
+    radial-gradient(at 18% 12%, rgba(199, 62, 43, .045), transparent 42%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .05 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  -webkit-font-smoothing: antialiased;
+}
+
+.app {
+  display: flex;
+  height: 100dvh;
+  max-width: 1480px;
+  margin: 0 auto;
+}
+
+/* ───────── サイドバー ───────── */
+
+.sidebar {
+  width: var(--sidebar-w);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--paper-edge);
+  background:
+    linear-gradient(to right, transparent calc(100% - 10px), rgba(33, 28, 21, .035)),
+    var(--paper-deep);
+}
+
+.brand { padding: 28px 24px 18px; }
+
+.brand-name {
+  font-family: var(--serif);
+  font-weight: 800;
+  font-size: 34px;
+  letter-spacing: .04em;
+  line-height: 1;
+}
+
+.brand-dot { color: var(--shu); }
+
+.brand-sub {
+  margin-top: 8px;
+  font-size: 11.5px;
+  letter-spacing: .14em;
+  color: var(--ink-faint);
+}
+
+.sidebar-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 18px 14px;
+}
+
+.search-wrap { position: relative; }
+
+.search-icon {
+  position: absolute;
+  width: 14px; height: 14px;
+  left: 12px; top: 50%;
+  translate: 0 -50%;
+  color: var(--ink-faint);
+  pointer-events: none;
+}
+
+.search {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 12px 9px 34px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color .15s;
+}
+
+.search:focus { border-color: var(--ink-faint); }
+.search::placeholder { color: var(--ink-faint); }
+
+.btn-new {
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  color: var(--paper);
+  background: var(--ink);
+  border: none;
+  border-radius: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  box-shadow: 0 2px 0 rgba(33, 28, 21, .25);
+  transition: background .15s, translate .08s;
+}
+
+.btn-new:hover { background: #38301f; }
+.btn-new:active { translate: 0 1px; box-shadow: 0 1px 0 rgba(33,28,21,.25); }
+.btn-new-plus { color: var(--shu); font-weight: 400; }
+
+/* メモ一覧 */
+
+.note-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 10px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--paper-edge) transparent;
+}
+
+.note-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  position: relative;
+  transition: background .12s;
+}
+
+.note-item + .note-item { margin-top: 2px; }
+
+.note-item:hover { background: rgba(33, 28, 21, .05); }
+
+.note-item.active {
+  background: var(--paper);
+  box-shadow: inset 2.5px 0 0 var(--shu), 0 1px 3px rgba(33, 28, 21, .07);
+}
+
+.note-item-title {
+  font-family: var(--serif);
+  font-weight: 600;
+  font-size: 14.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-item-title.untitled { color: var(--ink-faint); font-weight: 500; }
+
+.note-item-snippet {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-item-date {
+  margin-top: 5px;
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.note-list-empty {
+  padding: 28px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-faint);
+  letter-spacing: .1em;
+}
+
+/* サイドバー下部 */
+
+.sidebar-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--paper-edge);
+}
+
+.sync-chip {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font: inherit;
+  font-size: 11.5px;
+  letter-spacing: .06em;
+  color: var(--ink-soft);
+  background: none;
+  border: none;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.sync-chip:hover { background: rgba(33, 28, 21, .05); }
+
+.sync-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  flex: none;
+}
+
+.sync-dot.cloud   { background: var(--ok); box-shadow: 0 0 0 3px rgba(74, 122, 77, .15); }
+.sync-dot.error   { background: var(--shu); }
+.sync-dot.pending { background: #c9a13c; }
+
+/* ───────── 編集ペイン ───────── */
+
+.editor-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--paper);
+  box-shadow: -1px 0 0 var(--paper-edge);
+}
+
+.editor-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 22px 0;
+  min-height: 44px;
+}
+
+.spacer { flex: 1; }
+
+.save-state {
+  font-size: 11px;
+  letter-spacing: .14em;
+  color: var(--ink-faint);
+  transition: color .2s;
+}
+
+.save-state.saving { color: #c9a13c; }
+.save-state.saved  { color: var(--ok); }
+.save-state.error  { color: var(--shu); }
+
+.icon-btn {
+  width: 32px; height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 7px;
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background .12s, color .12s;
+}
+
+.icon-btn svg { width: 16px; height: 16px; }
+.icon-btn:hover { background: rgba(33, 28, 21, .06); }
+.icon-btn.danger:hover { color: var(--shu); background: rgba(199, 62, 43, .08); }
+
+.editor-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  margin: 0 auto;
+  padding: 18px 36px 28px;
+  min-height: 0;
+}
+
+.note-title {
+  font-family: var(--serif);
+  font-weight: 700;
+  font-size: clamp(24px, 3.4vw, 32px);
+  line-height: 1.35;
+  color: var(--ink);
+  background: none;
+  border: none;
+  outline: none;
+  width: 100%;
+}
+
+.note-title::placeholder { color: var(--paper-edge); }
+
+/* 朱の罫線と「記」の印 */
+.rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 18px;
+}
+
+.rule::before {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(to right, var(--shu) 0 56px, var(--paper-edge) 56px);
+}
+
+.rule-stamp {
+  font-family: var(--serif);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--shu);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 2px 4px;
+  letter-spacing: .1em;
+  opacity: .75;
+  user-select: none;
+}
+
+.note-body {
+  flex: 1;
+  width: 100%;
+  font-family: var(--sans);
+  font-size: 15.5px;
+  line-height: 2.05;
+  letter-spacing: .015em;
+  color: var(--ink);
+  background:
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0 calc(2.05em - 1px),
+      rgba(33, 28, 21, .055) calc(2.05em - 1px) 2.05em
+    );
+  background-attachment: local;
+  border: none;
+  outline: none;
+  resize: none;
+}
+
+.note-body::placeholder { color: var(--ink-faint); }
+
+.editor-meta {
+  padding-top: 12px;
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  gap: 18px;
+}
+
+/* 空の状態 */
+
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding-bottom: 8vh;
+}
+
+.empty-stamp {
+  font-family: var(--serif);
+  font-size: 30px;
+  font-weight: 700;
+  color: var(--shu);
+  width: 66px; height: 66px;
+  display: grid;
+  place-items: center;
+  border: 2px solid currentColor;
+  border-radius: 10px;
+  rotate: -4deg;
+  opacity: .5;
+  user-select: none;
+}
+
+.empty-line {
+  font-family: var(--serif);
+  font-size: 17px;
+  letter-spacing: .06em;
+  color: var(--ink-soft);
+}
+
+.empty-hint {
+  font-size: 12px;
+  letter-spacing: .1em;
+  color: var(--ink-faint);
+}
+
+/* ───────── 設定モーダル ───────── */
+
+.settings {
+  border: none;
+  border-radius: 14px;
+  padding: 0;
+  width: min(460px, calc(100vw - 32px));
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 18px 50px rgba(33, 28, 21, .3);
+}
+
+.settings::backdrop {
+  background: rgba(33, 28, 21, .35);
+  backdrop-filter: blur(2px);
+}
+
+.settings-inner { padding: 24px 26px 26px; }
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.settings-head h2 {
+  font-family: var(--serif);
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.settings-note {
+  font-size: 12px;
+  line-height: 1.9;
+  color: var(--ink-soft);
+  margin-bottom: 18px;
+}
+
+.settings-note a { color: var(--shu); }
+
+.field { display: block; margin-bottom: 14px; }
+
+.field span {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .12em;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+}
+
+.field input, .field select {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 12px;
+  color: var(--ink);
+  background: var(--paper-deep);
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  outline: none;
+}
+
+.field input:focus, .field select:focus { border-color: var(--ink-faint); }
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.btn-primary, .btn-secondary {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  padding: 9px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: none;
+}
+
+.btn-primary { color: var(--paper); background: var(--shu); }
+.btn-primary:hover { background: var(--shu-deep); }
+
+.btn-secondary {
+  color: var(--ink-soft);
+  background: none;
+  border: 1px solid var(--paper-edge);
+}
+
+.btn-secondary:hover { background: var(--paper-deep); }
+
+.auth-area { margin-top: 20px; }
+
+.rule-thin {
+  height: 1px;
+  background: var(--paper-edge);
+  margin-bottom: 16px;
+}
+
+.auth-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.auth-user { font-size: 12px; color: var(--ink-soft); }
+
+/* ───────── トースト ───────── */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 26px;
+  translate: -50% 16px;
+  background: var(--ink);
+  color: var(--paper);
+  font-size: 12.5px;
+  letter-spacing: .05em;
+  padding: 10px 20px;
+  border-radius: 99px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .25s, translate .25s;
+  max-width: calc(100vw - 40px);
+  z-index: 50;
+}
+
+.toast.show { opacity: 1; translate: -50% 0; }
+.toast.error { background: var(--shu-deep); }
+
+/* ───────── レスポンシブ ───────── */
+
+.only-mobile { display: none; }
+
+@media (max-width: 760px) {
+  .app { position: relative; }
+
+  .sidebar {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    z-index: 2;
+    border-right: none;
+  }
+
+  .editor-pane {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+  }
+
+  .app.editing .sidebar { display: none; }
+  .app.editing .editor-pane { z-index: 3; }
+
+  .only-mobile { display: inline-flex; }
+
+  .editor-body { padding: 12px 22px 20px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
