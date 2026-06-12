@@ -77,47 +77,26 @@
 <dialog class="settings" id="settings-dialog">
   <form method="dialog" class="settings-inner">
     <header class="settings-head">
-      <h2>iCloud 同期の設定</h2>
+      <h2>保存先の設定</h2>
       <button class="icon-btn" value="cancel" formnovalidate aria-label="閉じる">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 3.5 12.5 12.5M12.5 3.5 3.5 12.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
       </button>
     </header>
 
-    <p class="settings-note">
-      iCloud 同期には Apple Developer の CloudKit コンテナと API トークンが必要です。
-      手順は <a href="https://github.com/ideyuta/txt#icloud-同期のセットアップ" target="_blank" rel="noopener">README</a> を参照してください。
-      未設定のままでも、メモはこのブラウザ（ローカル）に保存されます。
-    </p>
+    <p class="settings-note" id="settings-status"></p>
 
-    <label class="field">
-      <span>コンテナ ID</span>
-      <input type="text" id="cfg-container" placeholder="iCloud.com.example.txt" autocomplete="off">
-    </label>
-    <label class="field">
-      <span>API トークン</span>
-      <input type="text" id="cfg-token" placeholder="64文字のトークン" autocomplete="off">
-    </label>
-    <label class="field">
-      <span>環境</span>
-      <select id="cfg-env">
-        <option value="development">development（開発・お試し）</option>
-        <option value="production">production（本番）</option>
-      </select>
-    </label>
-
-    <div class="settings-actions">
-      <button type="button" class="btn-secondary" id="cfg-clear">設定を消去</button>
-      <button type="button" class="btn-primary" id="cfg-save">保存して接続</button>
+    <div class="settings-actions stack">
+      <button type="button" class="btn-primary" id="btn-choose-folder">保存先フォルダを選択…</button>
+      <button type="button" class="btn-secondary" id="btn-migrate" hidden>このブラウザのメモをフォルダへコピー</button>
+      <button type="button" class="btn-secondary" id="btn-disconnect" hidden>フォルダ接続を解除</button>
     </div>
 
-    <div class="auth-area" id="auth-area" hidden>
-      <div class="rule-thin"></div>
-      <div class="auth-row">
-        <div id="apple-sign-in-button"></div>
-        <div id="apple-sign-out-button"></div>
-        <span class="auth-user" id="auth-user"></span>
-      </div>
-      <button type="button" class="btn-secondary" id="btn-migrate" hidden>このブラウザのメモを iCloud へコピー</button>
+    <div class="rule-thin"></div>
+
+    <div class="settings-actions">
+      <button type="button" class="btn-secondary" id="btn-export">エクスポート (JSON)</button>
+      <button type="button" class="btn-secondary" id="btn-import">インポート (JSON)</button>
+      <input type="file" id="import-file" accept=".json,application/json" hidden>
     </div>
   </form>
 </dialog>

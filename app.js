@@ -1,5 +1,11 @@
 /* ───────────────────────────────────────────
-   txt。 — iCloud (CloudKit JS) + localStorage メモ帳
+   txt。 — iCloud Drive フォルダ + localStorage メモ帳
+
+   保存先は 2 段構え:
+   - FolderStore: File System Access API でユーザーが選んだ
+     フォルダ（iCloud Drive 内を想定）に 1 メモ = 1 Markdown。
+     同期は iCloud Drive 任せ。Chromium デスクトップ限定。
+   - LocalStore: 非対応ブラウザ / 未接続時の localStorage。
    ─────────────────────────────────────────── */
 
 "use strict";
@@ -24,19 +30,55 @@ const els = {
   body: $("note-body"),
   meta: $("editor-meta"),
   dialog: $("settings-dialog"),
-  cfgContainer: $("cfg-container"),
-  cfgToken: $("cfg-token"),
-  cfgEnv: $("cfg-env"),
-  cfgSave: $("cfg-save"),
-  cfgClear: $("cfg-clear"),
-  authArea: $("auth-area"),
-  authUser: $("auth-user"),
+  settingsStatus: $("settings-status"),
+  btnChooseFolder: $("btn-choose-folder"),
+  btnDisconnect: $("btn-disconnect"),
   btnMigrate: $("btn-migrate"),
+  btnExport: $("btn-export"),
+  btnImport: $("btn-import"),
+  importFile: $("import-file"),
   toast: $("toast"),
 };
 
-const CONFIG_KEY = "txt.ck.config";
 const NOTES_KEY = "txt.notes.v1";
+const FS_SUPPORTED = "showDirectoryPicker" in window;
+
+/* ───────── IndexedDB（ディレクトリハンドルの永続化） ───────── */
+
+const idb = {
+  _open() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open("txt-db", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("kv");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  },
+  async get(key) {
+    const db = await this._open();
+    return new Promise((resolve, reject) => {
+      const req = db.transaction("kv").objectStore("kv").get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  },
+  async set(key, value) {
+    const db = await this._open();
+    return new Promise((resolve, reject) => {
+      const req = db.transaction("kv", "readwrite").objectStore("kv").put(value, key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  },
+  async del(key) {
+    const db = await this._open();
+    return new Promise((resolve, reject) => {
+      const req = db.transaction("kv", "readwrite").objectStore("kv").delete(key);
+      req.onsuccess = () => resolve();
+      req.onerror = () => reject(req.error);
+    });
+  },
+};
 
 /* ───────── ローカル保存 ───────── */
 
@@ -47,7 +89,7 @@ const LocalStore = {
     catch { return []; }
   },
   _write(notes) { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)); },
-  async list() { return this._read(); },
+  async list() { return this._read().sort((a, b) => b.updatedAt - a.updatedAt); },
   async save(note) {
     const notes = this._read();
     const i = notes.findIndex((n) => n.id === note.id);
@@ -58,73 +100,78 @@ const LocalStore = {
   async remove(id) { this._write(this._read().filter((n) => n.id !== id)); },
 };
 
-/* ───────── iCloud (CloudKit) 保存 ───────── */
+/* ───────── フォルダ保存（File System Access API） ───────── */
 
-const CloudStore = {
-  kind: "cloud",
-  db: null,
+// ファイル名 = サニタイズ済みタイトル + 4 文字 id + .md
+// 例: 買い物リスト.k3x9.md。id でリネーム時の同一性を担保する。
+const FILE_RE = /^(.*)\.([a-z0-9]{4})\.md$/;
+
+function parseFileName(name) {
+  const m = name.match(FILE_RE);
+  if (m) return { title: m[1], suffix: m[2] };
+  // 手動でフォルダに置かれた素の .md も一覧に出す
+  return { title: name.replace(/\.md$/, ""), suffix: null };
+}
+
+function sanitizeTitle(title) {
+  const clean = title
+    .replace(/[\/\\:*?"<>|\x00-\x1f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60)
+    .replace(/[. ]+$/, "");
+  return clean || "無題";
+}
+
+function newSuffix() {
+  return Math.random().toString(36).slice(2, 6).padEnd(4, "0");
+}
+
+const FolderStore = {
+  kind: "folder",
+  dir: null,
   async list() {
-    let query = { recordType: "Note" };
-    let options = { resultsLimit: 200 };
-    const records = [];
-    let response = await this.db.performQuery(query, options);
-    for (let page = 0; page < 10; page++) {
-      if (response.hasErrors) throw response.errors[0];
-      records.push(...response.records);
-      if (!response.moreComing) break;
-      response = await this.db.performQuery(response);
+    const notes = [];
+    for await (const entry of this.dir.values()) {
+      if (entry.kind !== "file" || !entry.name.endsWith(".md")) continue;
+      const file = await entry.getFile();
+      notes.push({
+        id: entry.name,
+        title: parseFileName(entry.name).title,
+        body: await file.text(),
+        updatedAt: file.lastModified,
+      });
     }
-    return records.map(recordToNote).sort((a, b) => b.updatedAt - a.updatedAt);
+    return notes.sort((a, b) => b.updatedAt - a.updatedAt);
   },
   async save(note) {
-    const record = {
-      recordType: "Note",
-      fields: {
-        title: { value: note.title },
-        body: { value: note.body },
-        updatedAt: { value: note.updatedAt },
-      },
-    };
-    if (!note.id.startsWith("l_")) {
-      record.recordName = note.id;
-      if (note.changeTag) record.recordChangeTag = note.changeTag;
+    const existing = note.id.startsWith("l_") ? null : note.id;
+    const suffix = (existing && parseFileName(existing).suffix) || newSuffix();
+    const desired = `${sanitizeTitle(note.title)}.${suffix}.md`;
+
+    let handle = null;
+    if (existing) {
+      try { handle = await this.dir.getFileHandle(existing); }
+      catch { handle = null; } // 他端末で削除 / 改名済み → 新規作成にフォールバック
     }
-    let response = await this.db.saveRecords([record]);
-    if (response.hasErrors) {
-      const err = response.errors[0];
-      // 競合（別端末が先に保存）→ 最新タグを取り直して上書き保存
-      if (err.ckErrorCode === "CONFLICT" && err.serverErrorCode !== "NOT_FOUND") {
-        const latest = await this.db.fetchRecords([record.recordName]);
-        if (!latest.hasErrors && latest.records[0]) {
-          record.recordChangeTag = latest.records[0].recordChangeTag;
-          response = await this.db.saveRecords([record]);
-          if (response.hasErrors) throw response.errors[0];
-        } else {
-          throw err;
-        }
+    if (handle && existing !== desired) {
+      if (typeof handle.move === "function") {
+        await handle.move(desired);
       } else {
-        throw err;
+        handle = null;
+        await this.dir.removeEntry(existing).catch(() => {});
       }
     }
-    return recordToNote(response.records[0]);
-  },
-  async remove(id) {
-    const response = await this.db.deleteRecords([id]);
-    if (response.hasErrors) throw response.errors[0];
-  },
-};
+    if (!handle) handle = await this.dir.getFileHandle(desired, { create: true });
 
-function recordToNote(record) {
-  return {
-    id: record.recordName,
-    title: record.fields.title ? record.fields.title.value : "",
-    body: record.fields.body ? record.fields.body.value : "",
-    updatedAt: record.fields.updatedAt
-      ? record.fields.updatedAt.value
-      : (record.modified ? record.modified.timestamp : Date.now()),
-    changeTag: record.recordChangeTag,
-  };
-}
+    const writable = await handle.createWritable();
+    await writable.write(note.body);
+    await writable.close();
+    const file = await handle.getFile();
+    return { ...note, id: desired, updatedAt: file.lastModified };
+  },
+  async remove(id) { await this.dir.removeEntry(id); },
+};
 
 /* ───────── 状態 ───────── */
 
@@ -136,6 +183,7 @@ const state = {
   dirty: false,
   saveTimer: null,
   saving: Promise.resolve(),
+  pendingDir: null, // 権限の再付与待ちハンドル
 };
 
 /* ───────── UI ヘルパー ───────── */
@@ -161,9 +209,7 @@ function setSaveState(mode, label) {
 
 function formatDate(ms) {
   const d = new Date(ms);
-  const today = new Date();
-  const sameDay = d.toDateString() === today.toDateString();
-  if (sameDay) {
+  if (d.toDateString() === new Date().toDateString()) {
     return d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
   }
   return d.toLocaleDateString("ja-JP", { year: "numeric", month: "numeric", day: "numeric" });
@@ -173,13 +219,19 @@ function currentNote() {
   return state.notes.find((n) => n.id === state.currentId) || null;
 }
 
+function fsErrorMessage(err, fallback) {
+  if (err && err.name === "NotAllowedError") return "フォルダへのアクセスが許可されていません（設定から再接続）";
+  if (err && err.name === "NotFoundError") return "保存先のフォルダ / ファイルが見つかりません";
+  if (err && err.name === "QuotaExceededError") return "ストレージ容量が不足しています";
+  return fallback;
+}
+
 /* ───────── 描画 ───────── */
 
 function renderList() {
   const q = state.query.trim().toLowerCase();
   const filtered = q
-    ? state.notes.filter((n) =>
-        (n.title + "\n" + n.body).toLowerCase().includes(q))
+    ? state.notes.filter((n) => (n.title + "\n" + n.body).toLowerCase().includes(q))
     : state.notes;
 
   els.list.innerHTML = "";
@@ -279,7 +331,9 @@ async function deleteNote() {
   clearTimeout(state.saveTimer);
   state.dirty = false;
   try {
-    if (!note.id.startsWith("l_") || state.store.kind === "local") {
+    if (!note.id.startsWith("l_")) {
+      await state.store.remove(note.id);
+    } else if (state.store.kind === "local") {
       await state.store.remove(note.id);
     }
     state.notes = state.notes.filter((n) => n.id !== note.id);
@@ -289,7 +343,7 @@ async function deleteNote() {
     toast("メモを削除しました");
   } catch (err) {
     console.error(err);
-    toast("削除に失敗しました", true);
+    toast(fsErrorMessage(err, "削除に失敗しました"), true);
   }
 }
 
@@ -321,19 +375,18 @@ function saveNow() {
     setSaveState("saving", "保存中…");
     try {
       const saved = await state.store.save({ ...note });
-      // iCloud 新規保存時はサーバ発行の ID / changeTag を反映
       if (saved.id !== note.id) {
         if (state.currentId === note.id) state.currentId = saved.id;
         note.id = saved.id;
       }
-      note.changeTag = saved.changeTag;
-      setSaveState("saved", state.store.kind === "cloud" ? "iCloud に保存済み" : "このブラウザに保存済み");
+      note.updatedAt = saved.updatedAt;
+      setSaveState("saved", state.store.kind === "folder" ? "フォルダに保存済み" : "このブラウザに保存済み");
       renderList();
     } catch (err) {
       console.error("save failed:", err);
       state.dirty = true;
       setSaveState("error", "保存に失敗しました");
-      toast(ckErrorMessage(err, "保存に失敗しました"), true);
+      toast(fsErrorMessage(err, "保存に失敗しました"), true);
     }
   });
 }
@@ -354,130 +407,99 @@ async function reloadNotes() {
     renderEditor();
   } catch (err) {
     console.error("list failed:", err);
-    toast(ckErrorMessage(err, "メモ一覧の取得に失敗しました"), true);
+    toast(fsErrorMessage(err, "メモ一覧の取得に失敗しました"), true);
   }
 }
 
-/* ───────── CloudKit 連携 ───────── */
+/* ───────── フォルダ接続 ───────── */
 
-function loadConfig() {
-  try { return JSON.parse(localStorage.getItem(CONFIG_KEY)); }
-  catch { return null; }
-}
-
-function ckErrorMessage(err, fallback) {
-  if (err && err.ckErrorCode) {
-    const map = {
-      AUTHENTICATION_REQUIRED: "iCloud へのサインインが必要です（設定から）",
-      AUTHENTICATION_FAILED: "iCloud 認証に失敗しました。トークンを確認してください",
-      QUOTA_EXCEEDED: "iCloud の容量が不足しています",
-      NETWORK_ERROR: "ネットワークに接続できません",
-      THROTTLED: "アクセスが集中しています。少し待って再試行してください",
-      BAD_REQUEST: "CloudKit のスキーマ設定を確認してください（README 参照）",
-    };
-    return map[err.ckErrorCode] || `${fallback}（${err.ckErrorCode}）`;
+async function chooseFolder() {
+  try {
+    const dir = await window.showDirectoryPicker({ mode: "readwrite" });
+    await flushSave();
+    await idb.set("dir", dir);
+    state.pendingDir = null;
+    await enterFolderMode(dir);
+    els.dialog.close();
+    toast(`「${dir.name}」と接続しました`);
+  } catch (err) {
+    if (err && err.name === "AbortError") return; // ユーザーがキャンセル
+    console.error(err);
+    toast(fsErrorMessage(err, "フォルダを開けませんでした"), true);
   }
-  return fallback;
 }
 
-let ckContainer = null;
-
-function loadCloudKitScript() {
-  return new Promise((resolve, reject) => {
-    if (window.CloudKit) return resolve();
-    window.addEventListener("cloudkitloaded", () => resolve(), { once: true });
-    const script = document.createElement("script");
-    script.src = "https://cdn.apple-cloudkit.com/ck/2/cloudkit.js";
-    script.async = true;
-    script.onerror = () => reject(new Error("CloudKit JS の読み込みに失敗しました"));
-    document.head.appendChild(script);
-  });
-}
-
-async function connectCloudKit(config) {
-  setSyncStatus("pending", "iCloud に接続中…");
-  await loadCloudKitScript();
-
-  CloudKit.configure({
-    locale: "ja-jp",
-    containers: [{
-      containerIdentifier: config.container,
-      apiTokenAuth: {
-        apiToken: config.token,
-        persist: true,
-        signInButton: { id: "apple-sign-in-button", theme: "black" },
-        signOutButton: { id: "apple-sign-out-button", theme: "black" },
-      },
-      environment: config.env || "development",
-    }],
-  });
-
-  ckContainer = CloudKit.getDefaultContainer();
-  els.authArea.hidden = false;
-
-  const userIdentity = await ckContainer.setUpAuth();
-  if (userIdentity) {
-    await enterCloudMode(userIdentity);
-  } else {
-    enterLocalMode("iCloud 未サインイン");
+async function reconnectFolder() {
+  const dir = state.pendingDir;
+  if (!dir) return;
+  try {
+    const perm = await dir.requestPermission({ mode: "readwrite" });
+    if (perm === "granted") {
+      state.pendingDir = null;
+      await enterFolderMode(dir);
+      toast(`「${dir.name}」に再接続しました`);
+    } else {
+      toast("アクセスが許可されませんでした", true);
+    }
+  } catch (err) {
+    console.error(err);
+    toast(fsErrorMessage(err, "再接続に失敗しました"), true);
   }
-  watchAuth();
 }
 
-function watchAuth() {
-  ckContainer.whenUserSignsIn().then(async (userIdentity) => {
-    await enterCloudMode(userIdentity);
-    watchAuth();
-  }).catch(() => watchAuth());
-  ckContainer.whenUserSignsOut().then(() => {
-    enterLocalMode("iCloud からサインアウト中");
-    watchAuth();
-  }).catch(() => {});
+async function disconnectFolder() {
+  if (!confirm("フォルダ接続を解除しますか？（フォルダ内の .md ファイルは残ります）")) return;
+  await idb.del("dir");
+  state.pendingDir = null;
+  enterLocalMode();
+  renderSettings();
+  toast("フォルダ接続を解除しました");
 }
 
-async function enterCloudMode(userIdentity) {
-  CloudStore.db = ckContainer.privateCloudDatabase;
-  state.store = CloudStore;
+async function enterFolderMode(dir) {
+  FolderStore.dir = dir;
+  state.store = FolderStore;
   state.currentId = null;
-  const name = userIdentity && userIdentity.nameComponents
-    ? `${userIdentity.nameComponents.familyName || ""} ${userIdentity.nameComponents.givenName || ""}`.trim()
-    : "";
-  els.authUser.textContent = name ? `${name} としてサインイン中` : "サインイン中";
-  setSyncStatus("cloud", "iCloud と同期中");
-  updateMigrateButton();
+  setSyncStatus("cloud", dir.name ? `フォルダと同期中: ${dir.name}` : "フォルダと同期中");
   await reloadNotes();
+  renderSettings();
 }
 
 function enterLocalMode(label) {
   state.store = LocalStore;
   state.currentId = null;
-  els.authUser.textContent = "";
-  setSyncStatus("", label || "ローカル保存");
-  updateMigrateButton();
+  setSyncStatus(state.pendingDir ? "pending" : "", label || "ローカル保存");
+  reloadNotes();
+  renderSettings();
+}
+
+// 他端末の変更（iCloud Drive が背後で同期したファイル）を拾う
+let lastRefresh = 0;
+function refreshFromDisk() {
+  if (state.store.kind !== "folder" || state.dirty) return;
+  if (Date.now() - lastRefresh < 4000) return;
+  lastRefresh = Date.now();
   reloadNotes();
 }
 
-function updateMigrateButton() {
-  const hasLocal = LocalStore._read().length > 0;
-  els.btnMigrate.hidden = !(state.store.kind === "cloud" && hasLocal);
-}
+/* ───────── 移行・エクスポート ───────── */
 
 async function migrateLocalNotes() {
   const localNotes = LocalStore._read();
   if (localNotes.length === 0) return;
-  if (!confirm(`このブラウザに保存された ${localNotes.length} 件のメモを iCloud にコピーします。よろしいですか？`)) return;
+  if (!confirm(`このブラウザに保存された ${localNotes.length} 件のメモをフォルダへコピーします。よろしいですか？`)) return;
 
   els.btnMigrate.disabled = true;
   let ok = 0;
   try {
     for (const note of localNotes) {
-      await CloudStore.save({ ...note, id: "l_migrate" });
+      await FolderStore.save({ ...note, id: "l_migrate" });
       ok++;
     }
     localStorage.removeItem(NOTES_KEY);
-    toast(`${ok} 件のメモを iCloud にコピーしました`);
-    updateMigrateButton();
+    toast(`${ok} 件のメモをフォルダへコピーしました`);
     await reloadNotes();
+    renderSettings();
   } catch (err) {
     console.error(err);
     toast(`${ok} 件コピー後に失敗しました。再度お試しください`, true);
@@ -486,36 +508,79 @@ async function migrateLocalNotes() {
   }
 }
 
+function exportNotes() {
+  const data = JSON.stringify(
+    state.notes.map(({ title, body, updatedAt }) => ({ title, body, updatedAt })),
+    null, 2
+  );
+  const blob = new Blob([data], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `txt-notes-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast(`${state.notes.length} 件をエクスポートしました`);
+}
+
+async function importNotes(file) {
+  try {
+    const parsed = JSON.parse(await file.text());
+    if (!Array.isArray(parsed)) throw new Error("not an array");
+    let ok = 0;
+    for (const item of parsed) {
+      if (typeof item.body !== "string" && typeof item.title !== "string") continue;
+      await state.store.save({
+        id: "l_import" + Math.random().toString(36).slice(2, 8),
+        title: String(item.title || ""),
+        body: String(item.body || ""),
+        updatedAt: Number(item.updatedAt) || Date.now(),
+      });
+      ok++;
+    }
+    await reloadNotes();
+    toast(`${ok} 件をインポートしました`);
+  } catch (err) {
+    console.error(err);
+    toast("インポートに失敗しました（JSON 形式を確認してください）", true);
+  }
+}
+
 /* ───────── 設定モーダル ───────── */
 
-function openSettings() {
-  const config = loadConfig() || {};
-  els.cfgContainer.value = config.container || "";
-  els.cfgToken.value = config.token || "";
-  els.cfgEnv.value = config.env || "development";
-  els.dialog.showModal();
-}
+function renderSettings() {
+  const connected = state.store.kind === "folder";
+  const pending = !!state.pendingDir;
 
-function saveSettings() {
-  const config = {
-    container: els.cfgContainer.value.trim(),
-    token: els.cfgToken.value.trim(),
-    env: els.cfgEnv.value,
-  };
-  if (!config.container || !config.token) {
-    toast("コンテナ ID と API トークンを入力してください", true);
-    return;
+  let status;
+  if (!FS_SUPPORTED) {
+    status = "このブラウザはフォルダ保存（File System Access API）に対応していません。"
+      + "Mac の Chrome / Edge で開くと iCloud Drive のフォルダに保存できます。"
+      + "メモは現在このブラウザ内に保存されています。"
+      + "※Safari は 7 日間アクセスがないとブラウザ内データを削除することがあるため、エクスポートで控えを残せます。";
+  } else if (connected) {
+    const name = FolderStore.dir && FolderStore.dir.name;
+    status = `フォルダ${name ? `「${name}」` : ""}と接続中。メモは 1 件 = 1 つの .md ファイルとして保存され、`
+      + "iCloud Drive 内のフォルダなら Apple が自動同期します。iPhone からはファイル.app で読めます。";
+  } else if (pending) {
+    status = `前回のフォルダ「${state.pendingDir.name}」への再接続待ちです。`
+      + "ブラウザのセキュリティ上、再訪時はワンクリックの再許可が必要な場合があります。";
+  } else {
+    status = "iCloud Drive 内のフォルダを選ぶと、メモが .md ファイルとして保存され、Apple が自動同期します。"
+      + "未接続の間はこのブラウザ内（localStorage）に保存されます。";
   }
-  localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
-  toast("設定を保存しました。iCloud に接続します…");
-  // CloudKit.configure は再構成できないためリロードで反映
-  setTimeout(() => location.reload(), 600);
+  els.settingsStatus.textContent = status;
+
+  els.btnChooseFolder.disabled = !FS_SUPPORTED;
+  els.btnChooseFolder.textContent = pending ? "前回のフォルダに再接続"
+    : connected ? "別のフォルダに変更…"
+    : "保存先フォルダを選択…";
+  els.btnDisconnect.hidden = !connected;
+  els.btnMigrate.hidden = !(connected && LocalStore._read().length > 0);
 }
 
-function clearSettings() {
-  if (!confirm("iCloud 接続設定を消去しますか？（メモ自体は消えません）")) return;
-  localStorage.removeItem(CONFIG_KEY);
-  location.reload();
+function openSettings() {
+  renderSettings();
+  els.dialog.showModal();
 }
 
 /* ───────── 起動 ───────── */
@@ -534,11 +599,25 @@ function bindEvents() {
     state.query = els.search.value;
     renderList();
   });
+
   els.btnSettings.addEventListener("click", openSettings);
-  els.syncChip.addEventListener("click", openSettings);
-  els.cfgSave.addEventListener("click", saveSettings);
-  els.cfgClear.addEventListener("click", clearSettings);
+  els.syncChip.addEventListener("click", () => {
+    // 再接続待ちならチップから直接再許可（ユーザー操作が必要なため）
+    if (state.pendingDir) reconnectFolder();
+    else openSettings();
+  });
+  els.btnChooseFolder.addEventListener("click", () => {
+    if (state.pendingDir) reconnectFolder();
+    else chooseFolder();
+  });
+  els.btnDisconnect.addEventListener("click", disconnectFolder);
   els.btnMigrate.addEventListener("click", migrateLocalNotes);
+  els.btnExport.addEventListener("click", exportNotes);
+  els.btnImport.addEventListener("click", () => els.importFile.click());
+  els.importFile.addEventListener("change", () => {
+    if (els.importFile.files[0]) importNotes(els.importFile.files[0]);
+    els.importFile.value = "";
+  });
 
   document.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "n") {
@@ -551,6 +630,11 @@ function bindEvents() {
     }
   });
 
+  window.addEventListener("focus", refreshFromDisk);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) flushSave();
+    else refreshFromDisk();
+  });
   window.addEventListener("beforeunload", () => {
     if (state.dirty) saveNow();
   });
@@ -558,19 +642,34 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
-  const config = loadConfig();
-  if (config && config.container && config.token) {
-    try {
-      await connectCloudKit(config);
-    } catch (err) {
-      console.error("CloudKit init failed:", err);
-      setSyncStatus("error", "iCloud 接続エラー");
-      toast(ckErrorMessage(err, "iCloud に接続できませんでした。ローカル保存に切り替えます"), true);
-      enterLocalMode("iCloud 接続エラー（ローカル保存）");
-    }
-  } else {
-    enterLocalMode();
+
+  // テスト用フック: ?opfs で OPFS ルートを保存先にする（picker はヘッドレスで操作不能のため）
+  if (new URLSearchParams(location.search).has("opfs")) {
+    const dir = await navigator.storage.getDirectory();
+    await enterFolderMode(dir);
+    return;
   }
+
+  if (FS_SUPPORTED) {
+    try {
+      const saved = await idb.get("dir");
+      if (saved) {
+        const perm = typeof saved.queryPermission === "function"
+          ? await saved.queryPermission({ mode: "readwrite" })
+          : "prompt";
+        if (perm === "granted") {
+          await enterFolderMode(saved);
+          return;
+        }
+        state.pendingDir = saved;
+        enterLocalMode(`フォルダ再接続が必要（クリック）`);
+        return;
+      }
+    } catch (err) {
+      console.error("handle restore failed:", err);
+    }
+  }
+  enterLocalMode();
 }
 
 init();

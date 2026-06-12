@@ -213,6 +213,7 @@ body {
 
 .sync-chip {
   flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -225,6 +226,12 @@ body {
   padding: 6px 8px;
   border-radius: 6px;
   cursor: pointer;
+}
+
+.sync-chip span:last-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sync-chip:hover { background: rgba(33, 28, 21, .05); }
@@ -416,6 +423,7 @@ body {
 /* ───────── 設定モーダル ───────── */
 
 .settings {
+  margin: auto; /* * リセットで消える UA のセンタリングを復元 */
   border: none;
   border-radius: 14px;
   padding: 0;
@@ -455,36 +463,16 @@ body {
 
 .settings-note a { color: var(--shu); }
 
-.field { display: block; margin-bottom: 14px; }
-
-.field span {
-  display: block;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .12em;
-  color: var(--ink-soft);
-  margin-bottom: 6px;
-}
-
-.field input, .field select {
-  width: 100%;
-  font: inherit;
-  font-size: 13px;
-  padding: 9px 12px;
-  color: var(--ink);
-  background: var(--paper-deep);
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  outline: none;
-}
-
-.field input:focus, .field select:focus { border-color: var(--ink-faint); }
-
 .settings-actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin-top: 18px;
+  margin-top: 16px;
+}
+
+.settings-actions.stack {
+  flex-direction: column;
+  align-items: stretch;
 }
 
 .btn-primary, .btn-secondary {
@@ -509,23 +497,16 @@ body {
 
 .btn-secondary:hover { background: var(--paper-deep); }
 
-.auth-area { margin-top: 20px; }
+.btn-primary:disabled, .btn-secondary:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
 
 .rule-thin {
   height: 1px;
   background: var(--paper-edge);
-  margin-bottom: 16px;
+  margin-top: 18px;
 }
-
-.auth-row {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.auth-user { font-size: 12px; color: var(--ink-soft); }
 
 /* ───────── トースト ───────── */
 
