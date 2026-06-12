@@ -183,6 +183,9 @@ const FolderStore = {
 
 /* ───────── Google ドライブ保存 ───────── */
 
+// このアプリ用の OAuth クライアント ID（公開前提の値。承認オリジンは ideyuta.com に限定済み）
+const DEFAULT_DRIVE_CLIENT_ID = "483568930924-dv3gkidlmkm7f815o36sts6b3bvfl6j7.apps.googleusercontent.com";
+
 const GIS_SRC = "https://accounts.google.com/gsi/client";
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
 const DRIVE_UPLOAD = "https://www.googleapis.com/upload/drive/v3";
@@ -815,7 +818,7 @@ function renderSettings() {
 
   // Google ドライブ
   const cfg = loadDriveCfg();
-  if (!els.driveClientId.value && cfg.clientId) els.driveClientId.value = cfg.clientId;
+  if (!els.driveClientId.value) els.driveClientId.value = cfg.clientId || DEFAULT_DRIVE_CLIENT_ID;
   els.btnDriveConnect.textContent = kind === "drive" ? "再接続 / アカウント切替"
     : state.drivePending ? "Google ドライブに再接続"
     : "Google ドライブに接続";
