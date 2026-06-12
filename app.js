@@ -48,7 +48,8 @@ const els = {
 
 const NOTES_KEY = "txt.notes.v1";
 const MODE_KEY = "txt.mode"; // "drive" | "folder" | "local"
-const DRIVE_CFG_KEY = "txt.drive.cfg"; // { clientId, folderId } トークンは保存しない
+const DRIVE_CFG_KEY = "txt.drive.cfg"; // { clientId, folderId }
+const DRIVE_TOKEN_KEY = "txt.drive.token"; // sessionStorage のみ（タブを閉じると消える）
 const FS_SUPPORTED = "showDirectoryPicker" in window;
 
 /* ───────── IndexedDB（ディレクトリハンドルの永続化） ───────── */
@@ -201,9 +202,31 @@ function saveDriveCfg(cfg) { localStorage.setItem(DRIVE_CFG_KEY, JSON.stringify(
 
 const Drive = {
   clientId: null,
-  token: null, // アクセストークンはメモリのみ（XSS 耐性のため永続化しない）
+  // トークンはメモリ + sessionStorage（リロード対策。タブを閉じると消え、localStorage には置かない）
+  token: null,
   tokenExp: 0,
   tokenClient: null,
+
+  _loadCachedToken() {
+    try {
+      const c = JSON.parse(sessionStorage.getItem(DRIVE_TOKEN_KEY));
+      if (c && c.exp - 60000 > Date.now()) {
+        this.token = c.token;
+        this.tokenExp = c.exp;
+      }
+    } catch { /* 壊れていたら無視 */ }
+  },
+
+  _cacheToken() {
+    try { sessionStorage.setItem(DRIVE_TOKEN_KEY, JSON.stringify({ token: this.token, exp: this.tokenExp })); }
+    catch { /* プライベートモード等は無視 */ }
+  },
+
+  clearToken() {
+    this.token = null;
+    this.tokenExp = 0;
+    sessionStorage.removeItem(DRIVE_TOKEN_KEY);
+  },
 
   async loadGis() {
     if (window.google && window.google.accounts && window.google.accounts.oauth2) return;
@@ -218,6 +241,7 @@ const Drive = {
   },
 
   async getToken() {
+    if (!this.token) this._loadCachedToken();
     if (this.token && Date.now() < this.tokenExp - 60000) return this.token;
     await this.loadGis();
     if (!this.tokenClient || this._tokenClientId !== this.clientId) {
@@ -238,6 +262,7 @@ const Drive = {
         if (resp.error) return fail(resp.error);
         this.token = resp.access_token;
         this.tokenExp = Date.now() + (Number(resp.expires_in) || 3600) * 1000;
+        this._cacheToken();
         resolve(this.token);
       };
       this.tokenClient.error_callback = (err) => fail(err && err.message ? err.message : "popup_blocked");
@@ -252,7 +277,7 @@ const Drive = {
       headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
     });
     if (res.status === 401 && retry) {
-      this.token = null; // 失効 → 取り直して 1 回だけ再試行
+      this.clearToken(); // 失効 → 取り直して 1 回だけ再試行
       return this.fetch(url, options, false);
     }
     if (!res.ok) {
@@ -656,7 +681,7 @@ async function connectDrive() {
   try {
     await flushSave();
     Drive.clientId = clientId;
-    Drive.token = null;
+    Drive.clearToken();
     await Drive.getToken(); // 初回はここで Google の同意ポップアップが開く
     const folderId = await Drive.ensureFolder();
     saveDriveCfg({ clientId, folderId });
@@ -673,7 +698,9 @@ async function connectDrive() {
   }
 }
 
-// 再訪時のサイレント再認証。ポップアップブロック等で失敗したらクリック待ちにする
+// 再訪時の再認証。sessionStorage のトークンが生きていれば無音で復帰し、
+// 失効時はポップアップを試す。ブロックされたら「次のユーザー操作」で自動リトライする
+// （操作中はポップアップが許可され、許可済みアカウントなら一瞬で自動クローズするため）。
 async function resumeDrive() {
   const cfg = loadDriveCfg();
   Drive.clientId = cfg.clientId;
@@ -686,8 +713,24 @@ async function resumeDrive() {
   } catch (err) {
     console.error("drive resume failed:", err);
     state.drivePending = true;
-    enterLocalMode("Google に再接続（クリック）");
+    enterLocalMode("Google に再接続中…（どこかをクリック）");
+    armDriveGestureResume();
   }
+}
+
+// 次の pointerdown / keydown（= ユーザー操作のジェスチャ内）で再認証を試す。
+// 暴発を避けるため自動リトライは 1 ページ表示につき 1 回。以降は左下チップから手動。
+let gestureResumeUsed = false;
+function armDriveGestureResume() {
+  if (gestureResumeUsed) return;
+  gestureResumeUsed = true;
+  const handler = () => {
+    window.removeEventListener("pointerdown", handler, true);
+    window.removeEventListener("keydown", handler, true);
+    if (state.drivePending) resumeDrive();
+  };
+  window.addEventListener("pointerdown", handler, true);
+  window.addEventListener("keydown", handler, true);
 }
 
 async function disconnectDrive() {
@@ -697,7 +740,7 @@ async function disconnectDrive() {
       google.accounts.oauth2.revoke(Drive.token, () => {});
     }
   } catch { /* revoke は失敗しても続行 */ }
-  Drive.token = null;
+  Drive.clearToken();
   localStorage.removeItem(DRIVE_CFG_KEY);
   localStorage.setItem(MODE_KEY, "local");
   state.drivePending = false;
